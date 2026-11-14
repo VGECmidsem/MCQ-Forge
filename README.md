@@ -35,6 +35,9 @@ dashboard, or drop one of the sample PDFs on `/upload`.
 To publish it publicly (Docker, Railway/Render, Vercel + Neon, or your own VPS), follow
 **[DEPLOY.md](DEPLOY.md)** — it walks through each option step by step.
 
+To check everything by hand in a browser — upload, extraction quality, editing, a full mock
+test, results and backup — follow **[VERIFY.md](VERIFY.md)** (a ~10 minute checklist).
+
 ## Tech stack
 
 - **Next.js 16 (App Router) + React 19 + TypeScript**, Tailwind CSS v4, Lucide icons
