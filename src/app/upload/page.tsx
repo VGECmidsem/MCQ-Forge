@@ -620,8 +620,8 @@ export default function UploadPage() {
             <h3 className="font-display text-sm">Answer key as a separate file</h3>
             <p className="mt-2 text-xs leading-relaxed text-[var(--muted)]">
               Upload the question paper first, then upload the key file with type{" "}
-              <strong className="text-[var(--ink)]">"Answer key PDF"</strong>. In{" "}
-              <strong className="text-[var(--ink)]">"Fill unresolved only"</strong> mode it never
+              <strong className="text-[var(--ink)]">&ldquo;Answer key PDF&rdquo;</strong>. In{" "}
+              <strong className="text-[var(--ink)]">&ldquo;Fill unresolved only&rdquo;</strong> mode it never
               overwrites answers already found; pick a specific source to deliberately re-apply a
               key across that document.
             </p>

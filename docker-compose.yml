@@ -1,0 +1,42 @@
+# One-command self-hosted stack:  docker compose up --build
+# Website -> http://localhost:3000   (data persists in the `pgdata` volume)
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mcqforge
+      POSTGRES_PASSWORD: mcqforge
+      POSTGRES_DB: mcqforge
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mcqforge -d mcqforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  web:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://mcqforge:mcqforge@db:5432/mcqforge
+      # Optional AI answer solving (Gemini or any OpenAI-compatible API):
+      # GEMINI_API_KEY: ""
+      # OPENAI_API_KEY: ""
+      # OPENAI_BASE_URL: https://api.openai.com/v1
+      # OPENAI_MODEL: gpt-4o-mini
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test:
+        ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

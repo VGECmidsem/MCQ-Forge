@@ -31,3 +31,9 @@ scratch/
 
 # coverage
 coverage/
+
+# local embedded database (npm run site)
+.data/
+
+# build info
+*.tsbuildinfo

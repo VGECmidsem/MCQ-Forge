@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   Database,
   FileUp,
@@ -26,12 +26,12 @@ const LINKS = [
 
 export function Nav() {
   const pathname = usePathname();
-  const [dark, setDark] = useState(false);
+  // Read the initial theme from the <html> class during the first render
+  // (the theme script in layout.tsx sets it before hydration).
+  const [dark, setDark] = useState(
+    () => typeof document !== "undefined" && document.documentElement.classList.contains("dark"),
+  );
   const [open, setOpen] = useState(false);
-
-  useEffect(() => {
-    setDark(document.documentElement.classList.contains("dark"));
-  }, []);
 
   const toggleTheme = () => {
     const next = !dark;

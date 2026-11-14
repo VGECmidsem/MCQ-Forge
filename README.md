@@ -21,16 +21,35 @@ performance analytics.
 | Exam UI | One question at a time, A–D choice buttons, prev/next, mark-for-review, jump palette with answered/unanswered/marked states, live countdown, keyboard shortcuts (1–4, arrows), autosave + resume, guarded submit. Mobile responsive with palette drawer. |
 | Results | Score donut, attempted/correct/incorrect/unanswered/ungraded, marks & negative marks, accuracy, time taken, topic-wise bars, full question review with your pick vs correct answer + explanations, filters (incorrect/marked), retake and new-random-test actions. |
 
+## Quick start — run it as a website
+
+```bash
+npm install
+npm run site          # → http://localhost:3000
+```
+
+No database to install: the `site` script boots an embedded PostgreSQL (data in `.data/pg`),
+applies migrations, builds and serves the app. Then click **Load demo question bank** on the
+dashboard, or drop one of the sample PDFs on `/upload`.
+
+To publish it publicly (Docker, Railway/Render, Vercel + Neon, or your own VPS), follow
+**[DEPLOY.md](DEPLOY.md)** — it walks through each option step by step.
+
 ## Tech stack
 
 - **Next.js 16 (App Router) + React 19 + TypeScript**, Tailwind CSS v4, Lucide icons
 - **PostgreSQL + Drizzle ORM** (`sources`, `questions`, `tests`, `attempts`)
-- pdf.js `pdfjs-dist` (server-side text extraction + rendering), `tesseract.js` OCR, `xlsx` export
+- pdf.js `pdfjs-dist` (server-side text extraction + rendering), `tesseract.js` OCR with the
+  `eng` model bundled in `assets/tesseract/` (works offline), `xlsx` export
 - Deterministic parsing wherever possible — AI is used only for question solving, never for extraction
 
-## Environment variables (all optional, server-side only)
+## Environment variables
+
+`DATABASE_URL` is required in every deployment (the `npm run site` wrapper creates one for you).
+The AI keys below are optional and server-side only:
 
 ```env
+DATABASE_URL=postgresql://user:password@host:5432/mcqforge
 GEMINI_API_KEY=...        # enables AI answer generation via Gemini (recommended)
 GEMINI_MODEL=gemini-2.0-flash
 # — OR —
@@ -41,6 +60,18 @@ OPENAI_MODEL=gpt-4o-mini
 
 Without an AI key everything still works: answer keys, marked answers, manual editing, tests,
 and the whole bank are fully functional — unresolved questions just remain *Needs Verification*.
+
+## npm scripts
+
+| Script | What it does |
+| --- | --- |
+| `npm run site` | **One-command website**: embedded Postgres + migrations + build + serve. |
+| `npm run dev` | Next.js dev server (needs `DATABASE_URL`). |
+| `npm run build` / `npm start` | Standalone production build / serve (needs `DATABASE_URL`). |
+| `npm run start:prod` | Apply migrations, then `next start` — used by hosters. |
+| `npm run db:migrate` | Apply `drizzle/*.sql` migrations (idempotent). |
+| `npm run db:generate` | Generate a new migration from `src/db/schema.ts`. |
+| `npm run lint` / `npm run typecheck` | ESLint / `tsc --noEmit`. |
 
 ## Testing the pipeline
 
@@ -56,3 +87,7 @@ node scripts/make-samples.mjs   # writes 4 sample PDFs to scratch/samples/
 - `sample-scanned.pdf` — image-only page that exercises the OCR pipeline
 
 There's also a one-click **demo question bank** on the home dashboard for instant testing.
+
+## License
+
+MIT — use it, fork it, run it for your own exams.

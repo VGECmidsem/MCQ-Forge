@@ -2,10 +2,14 @@
 // (vertical options, multi-line stems, math symbols, answer key + explanations)
 // for end-to-end pipeline testing.
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import PDFDocument from "pdfkit";
 
-const OUT = "/app/scratch/samples/ee-practice-set.pdf";
-fs.mkdirSync("/app/scratch/samples", { recursive: true });
+const OUT = SAMPLES + "/ee-practice-set.pdf";
+// Portable output directory: <repo>/scratch/samples (works from any checkout).
+const SAMPLES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "scratch", "samples");
+fs.mkdirSync(SAMPLES, { recursive: true });
 
 const QS = [
   {

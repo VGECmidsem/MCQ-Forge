@@ -1,14 +1,18 @@
 // Generates sample MCQ PDFs for end-to-end testing of the pipeline.
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import PDFDocument from "pdfkit";
 import { createCanvas } from "@napi-rs/canvas";
 
-fs.mkdirSync("/app/scratch/samples", { recursive: true });
+// Portable output directory: <repo>/scratch/samples (works from any checkout).
+const SAMPLES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "scratch", "samples");
+fs.mkdirSync(SAMPLES, { recursive: true });
 
 // ---------- Sample 1: vertical options + trailing answer key + explanations
 {
   const doc = new PDFDocument({ margin: 50 });
-  doc.pipe(fs.createWriteStream("/app/scratch/samples/sample-vertical-key.pdf"));
+  doc.pipe(fs.createWriteStream(SAMPLES + "/sample-vertical-key.pdf"));
   doc.fontSize(16).text("Electrical Engineering — Practice Set 1", { align: "center" });
   doc.moveDown();
   const qs = [
@@ -46,7 +50,7 @@ fs.mkdirSync("/app/scratch/samples", { recursive: true });
 // ---------- Sample 2: horizontal options + inline Ans markers + multi-line question
 {
   const doc = new PDFDocument({ margin: 50 });
-  doc.pipe(fs.createWriteStream("/app/scratch/samples/sample-horizontal-inline.pdf"));
+  doc.pipe(fs.createWriteStream(SAMPLES + "/sample-horizontal-inline.pdf"));
   doc.fontSize(14).font("Helvetica").text("General Knowledge Quiz", { align: "center" });
   doc.moveDown();
   const rows = [
@@ -70,7 +74,7 @@ fs.mkdirSync("/app/scratch/samples", { recursive: true });
 // ---------- Sample 3: bold-marked correct options (no key at all)
 {
   const doc = new PDFDocument({ margin: 50 });
-  doc.pipe(fs.createWriteStream("/app/scratch/samples/sample-bold-marked.pdf"));
+  doc.pipe(fs.createWriteStream(SAMPLES + "/sample-bold-marked.pdf"));
   doc.fontSize(14).font("Helvetica").text("Mathematics Drill (answers marked in bold)", { align: "center" });
   doc.moveDown();
   const rows = [
@@ -118,10 +122,10 @@ fs.mkdirSync("/app/scratch/samples", { recursive: true });
   lines.forEach((l, i) => ctx.fillText(l, 90, 170 + i * 40));
   const png = canvas.toBuffer("image/png");
   const doc = new PDFDocument({ size: "A4", margin: 0 });
-  doc.pipe(fs.createWriteStream("/app/scratch/samples/sample-scanned.pdf"));
+  doc.pipe(fs.createWriteStream(SAMPLES + "/sample-scanned.pdf"));
   doc.image(png, 0, 0, { width: 595.28, height: 841.89 });
   doc.end();
   await new Promise((r) => setTimeout(r, 400));
 }
 
-console.log("samples ready:", fs.readdirSync("/app/scratch/samples"));
+console.log("samples ready:", fs.readdirSync(SAMPLES));

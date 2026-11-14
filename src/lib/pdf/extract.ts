@@ -1,6 +1,9 @@
 // Server-side PDF extraction: text-layer parsing with pdf.js and OCR fallback
 // (pdf.js render -> png buffer -> tesseract.js) for scanned/image pages.
 
+import fs from "node:fs";
+import path from "node:path";
+
 export interface PdfLine {
   text: string;
   page: number; // 1-indexed
@@ -320,7 +323,26 @@ export async function extractPdf(
             emit(p, true, `Page ${p}/${pageCount}: scanned page — starting OCR…`);
             if (!ocrWorker) {
               const tesseract: any = await import("tesseract.js");
+              // Prefer the language model vendored in the repo (assets/tesseract)
+              // so OCR works offline / in locked-down containers. tesseract.js
+              // falls back to the jsdelivr CDN when langPath is omitted.
+              const bundledLangs = path.resolve(process.cwd(), "assets", "tesseract");
+              const bundledModel = path.join(bundledLangs, "eng.traineddata");
+              const hasBundled = fs.existsSync(bundledModel);
+              // cachePath defaults to the process cwd — point it at a writable dir
+              // so read-only deployments (containers, Vercel) don't fail.
+              const cachePath = hasBundled
+                ? bundledLangs
+                : path.join(process.env.TMPDIR || "/tmp", "mcqforge-tesseract");
+              try {
+                fs.mkdirSync(cachePath, { recursive: true });
+              } catch {
+                /* fall back to tesseract.js default */
+              }
               ocrWorker = await tesseract.createWorker("eng", 1, {
+                langPath: hasBundled ? bundledLangs : undefined,
+                cachePath,
+                gzip: false, // the bundled eng.traineddata is uncompressed
                 logger: (m: any) => {
                   if (m?.status === "recognizing text" && typeof m.progress === "number") {
                     ocrSubRatio = Math.min(0.98, m.progress);
