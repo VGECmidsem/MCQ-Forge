@@ -1,0 +1,33 @@
+# dependencies
+node_modules/
+
+# next build output
+.next/
+out/
+
+# local environment
+.env
+.env.local
+.env.*.local
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# drizzle / db temp
+.drizzle/
+
+# local scratch / generated test assets
+scratch/
+
+# os / editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# coverage
+coverage/

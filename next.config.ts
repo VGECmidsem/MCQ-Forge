@@ -1,0 +1,13 @@
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  serverExternalPackages: [
+    "pdfjs-dist",
+    "@napi-rs/canvas",
+    "tesseract.js",
+    "xlsx",
+    "pdfkit",
+  ],
+};
+
+export default nextConfig;
