@@ -143,6 +143,18 @@ Notes for Vercel:
 
 ---
 
+## GitHub Pages cannot host this app
+
+GitHub Pages only serves **static files** — no Node process, no PostgreSQL, no PDF parsing or
+OCR. The Pages site currently enabled on this repo (`main` → `/`) just renders `README.md` with
+Jekyll; it is the documentation, not the application.
+
+If you want a public link, use one of the four options above (Railway/Render give a free
+`*.up.railway.app` / `*.onrender.com` URL in minutes). You can then either turn Pages off
+(*Settings → Pages → Source: None*) or keep it purely as documentation.
+
+---
+
 ## Environment variables
 
 Set these on whichever platform you choose (all optional except `DATABASE_URL`):
