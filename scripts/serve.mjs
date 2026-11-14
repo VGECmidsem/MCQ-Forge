@@ -31,7 +31,10 @@ const flag = (name, fallback) => {
 const has = (name) => argv.includes(`--${name}`);
 
 const PORT = Number(flag("port", process.env.PORT || 3000));
-const HOST = process.env.HOSTNAME || "0.0.0.0";
+// Bind to all interfaces by default. NOTE: do not honour process.env.HOSTNAME —
+// Docker and GitHub Codespaces set it to the *container hostname*, which would
+// make the server listen on an unreachable address and break port forwarding.
+const HOST = flag("host", process.env.MCQ_HOST || "0.0.0.0");
 const PG_PORT = Number(flag("pg-port", process.env.MCQ_PG_PORT || 54329));
 const DATA_DIR = path.resolve(root, flag("data-dir", process.env.MCQ_DATA_DIR || ".data/pg"));
 const DB_NAME = process.env.MCQ_DB_NAME || "mcqforge";

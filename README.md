@@ -39,6 +39,9 @@ To publish it publicly (Docker, Railway/Render, Vercel + Neon, or your own VPS),
 To check everything by hand in a browser — upload, extraction quality, editing, a full mock
 test, results and backup — follow **[VERIFY.md](VERIFY.md)** (a ~10 minute checklist).
 
+Working straight from GitHub? **[GITHUB.md](GITHUB.md)** covers running it in Codespaces, deploying
+from the repo, cloning to your machine and the everyday commit/PR workflow.
+
 ## Tech stack
 
 - **Next.js 16 (App Router) + React 19 + TypeScript**, Tailwind CSS v4, Lucide icons
