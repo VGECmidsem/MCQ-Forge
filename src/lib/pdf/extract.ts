@@ -1,10 +1,20 @@
 // Server-side PDF extraction: text-layer parsing with pdf.js and OCR fallback
 // (pdf.js render -> png buffer -> tesseract.js) for scanned/image pages.
 
+import fs from "node:fs";
+import path from "node:path";
+
 export interface PdfLine {
   text: string;
   page: number; // 1-indexed
   boldRatio: number; // fraction of bold glyphs on the line (0..1)
+  // Optional layout info. Only OCR populates these; the text layer already
+  // emits properly ordered lines. `x` is the left edge as a fraction of the
+  // page width, which lets the parser tell a left nav column apart from the
+  // question body.
+  x?: number;
+  xEnd?: number;
+  rightGap?: number;
 }
 
 export interface ExtractResult {
@@ -126,6 +136,137 @@ function makeCanvasFactory(createCanvas: any) {
   };
 }
 
+interface OcrWord {
+  text: string;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+function flattenOcrWords(result: any): OcrWord[] {
+  const out: OcrWord[] = [];
+  const blocks = result?.data?.blocks;
+  if (Array.isArray(blocks) && blocks.length) {
+    for (const b of blocks)
+      for (const p of b.paragraphs ?? [])
+        for (const l of p.lines ?? [])
+          for (const w of l.words ?? []) {
+            const t = (w?.text ?? "").trim();
+            const bb = w?.bbox;
+            if (!t || !bb) continue;
+            out.push({ text: t, x0: bb.x0, y0: bb.y0, x1: bb.x1, y1: bb.y1 });
+          }
+    if (out.length) return out;
+  }
+  // Fallback: some tesseract builds only return flat text. Synthesise one
+  // word per line so callers still get something usable.
+  const text: string = result?.data?.text ?? "";
+  text
+    .split(/\r?\n/)
+    .forEach((line, i) => {
+      line
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean)
+        .forEach((t, j) => out.push({ text: t, x0: j * 10, y0: i * 20, x1: j * 10 + 9, y1: i * 20 + 18 }));
+    });
+  return out;
+}
+
+/**
+ * Find the left edge of the main content column.
+ *
+ * Scans (browser) screenshots exported to PDF often carry a left navigation
+ * rail. OCR reads it on the same visual rows as the body, so without this the
+ * nav labels get spliced into question text. We look for the widest vertical
+ * whitespace gutter in the left third that has a meaningful number of words on
+ * BOTH sides of it — i.e. an actual column boundary rather than ordinary
+ * inter-word spacing or a right-hand ragged edge.
+ */
+function detectColumnGutter(words: OcrWord[], pageWidth: number): number {
+  if (words.length < 20 || !pageWidth) return 0;
+  const occupied = new Uint8Array(Math.ceil(pageWidth) + 2);
+  for (const w of words) {
+    const a = Math.max(0, Math.floor(w.x0));
+    const b = Math.min(occupied.length - 1, Math.ceil(w.x1));
+    for (let x = a; x <= b; x++) occupied[x] = 1;
+  }
+  let best: { start: number; end: number } | null = null;
+  for (let x = 0; x < pageWidth; x++) {
+    if (occupied[x]) continue;
+    let e = x;
+    while (e < pageWidth && !occupied[e]) e++;
+    const len = e - x;
+    if (len >= Math.max(12, pageWidth * 0.006)) {
+      const left = words.filter((w) => w.x1 <= x).length;
+      const right = words.filter((w) => w.x0 >= e).length;
+      const span = (left + right) / words.length;
+      if (left >= 6 && right > left * 0.8 && span >= 0.55) {
+        if (!best || len > best.end - best.start) best = { start: x, end: e };
+      }
+    }
+    x = e;
+  }
+  if (!best) return 0;
+  return Math.round((best.start + best.end) / 2);
+}
+
+/** Group words into visual rows, then join them into lines of text. */
+function rowsToLines(
+  words: OcrWord[],
+  page: number,
+  pageWidth: number,
+  contentStart: number,
+): PdfLine[] {
+  if (!words.length) return [];
+  const sorted = [...words].sort((a, b) => a.y0 - b.y0);
+  const rows: { cy: number; words: OcrWord[] }[] = [];
+  for (const w of sorted) {
+    const cy = (w.y0 + w.y1) / 2;
+    const h = Math.max(1, w.y1 - w.y0);
+    const row = rows.find((r) => Math.abs(r.cy - cy) < Math.max(6, h * 0.55));
+    if (row) {
+      row.words.push(w);
+      row.cy = (row.cy * (row.words.length - 1) + cy) / row.words.length;
+    } else {
+      rows.push({ cy, words: [w] });
+    }
+  }
+  rows.sort((a, b) => a.cy - b.cy);
+
+  const lines: PdfLine[] = [];
+  for (const row of rows) {
+    const ws = row.words.sort((a, b) => a.x0 - b.x0);
+    const avgH =
+      ws.reduce((s, w) => s + Math.max(1, w.y1 - w.y0), 0) / Math.max(1, ws.length);
+    let text = "";
+    for (let i = 0; i < ws.length; i++) {
+      if (i > 0) {
+        const gap = ws[i].x0 - ws[i - 1].x1;
+        // Two spaces for a wide gap — the option scanner relies on it to tell
+        // separate columns ("(A) foo   (B) bar") from words in one sentence.
+        text += gap > avgH * 0.14 ? "  " : " ";
+      }
+      text += ws[i].text;
+    }
+    const cleaned = text.replace(/[ \t]+/g, " ").trim();
+    if (!cleaned) continue;
+    const x0 = Math.min(...ws.map((w) => w.x0));
+    const x1 = Math.max(...ws.map((w) => w.x1));
+    lines.push({
+      text: cleaned,
+      page,
+      boldRatio: 0,
+      x: pageWidth ? x0 / pageWidth : undefined,
+      xEnd: pageWidth ? x1 / pageWidth : undefined,
+      rightGap: pageWidth ? Math.max(0, pageWidth - x1) / pageWidth : undefined,
+    });
+  }
+  void contentStart;
+  return lines;
+}
+
 async function ocrPageBest(
   page: any,
   pageNum: number,
@@ -144,13 +285,15 @@ async function ocrPageBest(
     }).promise;
     const png = pair.canvas.toBuffer("image/png");
     factory.destroy(pair);
-    const res = await worker.recognize(png);
-    const text: string = res?.data?.text ?? "";
-    return text
-      .split(/\r?\n/)
-      .map((t: string) => t.replace(/\s+/g, " ").trim())
-      .filter(Boolean)
-      .map((t: string) => ({ text: t, page: pageNum, boldRatio: 0 }));
+
+    // Ask for block/line/word structure: without bounding boxes every line
+    // becomes one flat string and a sidebar is indistinguishable from a stem.
+    const res = await worker.recognize(png, {}, { blocks: true });
+    const words = flattenOcrWords(res);
+    const width = Math.ceil(viewport.width);
+    const gutter = detectColumnGutter(words, width);
+    const content = gutter ? words.filter((w) => w.x1 > gutter + 6) : words;
+    return rowsToLines(content.length ? content : words, pageNum, width, gutter);
   } catch {
     return [];
   }
@@ -320,7 +463,26 @@ export async function extractPdf(
             emit(p, true, `Page ${p}/${pageCount}: scanned page — starting OCR…`);
             if (!ocrWorker) {
               const tesseract: any = await import("tesseract.js");
+              // Prefer the language model vendored in the repo (assets/tesseract)
+              // so OCR works offline / in locked-down containers. tesseract.js
+              // falls back to the jsdelivr CDN when langPath is omitted.
+              const bundledLangs = path.resolve(process.cwd(), "assets", "tesseract");
+              const bundledModel = path.join(bundledLangs, "eng.traineddata");
+              const hasBundled = fs.existsSync(bundledModel);
+              // cachePath defaults to the process cwd — point it at a writable dir
+              // so read-only deployments (containers, Vercel) don't fail.
+              const cachePath = hasBundled
+                ? bundledLangs
+                : path.join(process.env.TMPDIR || "/tmp", "mcqforge-tesseract");
+              try {
+                fs.mkdirSync(cachePath, { recursive: true });
+              } catch {
+                /* fall back to tesseract.js default */
+              }
               ocrWorker = await tesseract.createWorker("eng", 1, {
+                langPath: hasBundled ? bundledLangs : undefined,
+                cachePath,
+                gzip: false, // the bundled eng.traineddata is uncompressed
                 logger: (m: any) => {
                   if (m?.status === "recognizing text" && typeof m.progress === "number") {
                     ocrSubRatio = Math.min(0.98, m.progress);

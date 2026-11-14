@@ -215,6 +215,12 @@ function zoneScan(lines: PdfLine[]): ZoneInfo {
   let mode: "none" | "key" | "expl" = "none";
   let zoneBuf: PdfLine[] = [];
 
+  // A trailing "Solutions" SECTION heading appears once and owns the rest of
+  // the document. A browser-rendered report repeats "Solution :" after every
+  // question; those are inline, so the whole tail must not be swallowed.
+  const explHeadingCount = lines.filter((l) => EXPL_HEADING.test(l.text.trim())).length;
+  const repeatedInlineSolutions = explHeadingCount >= 2;
+
   const flush = () => {
     if (!zoneBuf.length) return;
     if (mode === "key") {
@@ -234,7 +240,7 @@ function zoneScan(lines: PdfLine[]): ZoneInfo {
       skip[i] = true;
       continue;
     }
-    if (EXPL_HEADING.test(t)) {
+    if (EXPL_HEADING.test(t) && !repeatedInlineSolutions) {
       flush();
       mode = "expl";
       skip[i] = true;
@@ -353,18 +359,162 @@ const ANS_INLINE =
 const EXPL_INLINE =
   /^\s*(?:explanation|explaination|solution|sol\.?|reason|rationale|hint)\b\s*[:\-.]?\s*(.*)$/i;
 
+// OCR frequently confuses capital letters with digits at small sizes:
+// "(B)" -> "(8)", "(D)" -> "(0)", "Q.2" -> "0.2". Undo the ones we can be
+// certain about so option chains and question numbers still line up.
+const OCR_LETTER_DIGITS: Record<string, string> = {
+  "0": "D",
+  "5": "B",
+  "8": "B",
+  "6": "G",
+  "1": "I",
+};
+const OCR_LETTER_NOISE = new Set(["©", "®", "¢", "€", "e"]);
+
+function normaliseMarkerLetter(raw: string): string {
+  const ch = raw.trim();
+  if (LETTERS.includes(ch)) return ch;
+  return OCR_LETTER_DIGITS[ch] ?? ch;
+}
+
+// ---------- "Correct Option" badge (browser-render screenshots) ----------
+// Exported test reports highlight the right answer and label it. Treat that
+// badge as a marked answer, exactly like a tick mark.
+// OCR mangles this badge constantly: "Correct"/"Carrect"/"Correet"
+// "Option"/"0ption". Allow one wrong vowel anywhere in the first word.
+const CORRECT_BADGE =
+  /(?:c[o0a][rnm][rnm][eac][ck]t?|c[o0]r+[eac]ct|right)\s*(?:[o0]p?t?i?o?n?|answer|choice)\b/i;
+
+function stripCorrectBadge(seg: string): { text: string; badge: boolean } {
+  if (!CORRECT_BADGE.test(seg)) return { text: seg, badge: false };
+  const text = seg
+    .replace(new RegExp(CORRECT_BADGE.source + "[^a-z0-9]*", "gi"), " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return { text, badge: true };
+}
+
+// ---------- Left navigation rail removal ----------
+const NAV_RAIL_RE =
+  /^(?:home|my\s*test|bookmarks?|my\s*profiles?|reports?|buy\s*package|packages?|news|test\s*schedule|dashboard|menu|profile|settings|logout|sign\s*out|course|live|videos?|papers?|ebooks?)\b/i;
+
+/**
+ * Drop lines that sit in the narrow left rail of a screenshot-style page.
+ * Only fires when the document actually has such a rail: a line must start
+ * left of 22% of the width AND either reach further right than the rail OR
+ * read like a nav label. Body text on a normal page starts near the margin and
+ * extends across the page, so it is left untouched.
+ */
+function stripNavRail(lines: PdfLine[]): { lines: PdfLine[]; removed: number } {
+  const withX = lines.filter((l) => typeof l.x === "number");
+  if (withX.length < lines.length * 0.5 || withX.length < 10) {
+    return { lines, removed: 0 };
+  }
+  // Rail width = how far right the left-most cluster of text extends.
+  const leftish = lines.filter((l) => (l.x ?? 1) < 0.35);
+  const railEnd = leftish.length
+    ? Math.max(...leftish.map((l) => l.xEnd ?? 0))
+    : 0;
+  const hasRail =
+    leftish.length >= 4 &&
+    leftish.every((l) => (l.xEnd ?? 0) <= railEnd + 0.02) &&
+    lines.some((l) => (l.x ?? 1) >= railEnd);
+  if (!hasRail) return { lines, removed: 0 };
+
+  const kept: PdfLine[] = [];
+  let removed = 0;
+  for (const l of lines) {
+    const x = l.x;
+    const xEnd = l.xEnd ?? x ?? 0;
+    if (typeof x !== "number") {
+      kept.push(l);
+      continue;
+    }
+    if (x < railEnd + 0.005 && xEnd <= railEnd + 0.02) {
+      // Entirely inside the rail: nav chrome. Keep very short numbers in case
+      // they are option letters stacked in the left column.
+      if (NAV_RAIL_RE.test(l.text) || /^[A-Za-z][\s\S]{0,3}$/.test(l.text) === false) {
+        removed++;
+        continue;
+      }
+    }
+    kept.push(l);
+  }
+  return removed >= 2 ? { lines: kept, removed } : { lines, removed: 0 };
+}
+
+// Browser-render reports put a "Have any Doubt ?" button on every question
+// header line. When present the question number is authoritative even if OCR
+// mangled the leading "Q" into "0".
+const DOUBT_BADGE = /have\s*any\s*doubt/i;
+const CHROME_LINE =
+  /^(?:[\s|\]\[()[\]{}<>=\-–—,.;:'"]*(?:question\s*analytics|have\s*any\s*doubt|solution\s*:?|sign\s*out|enroll\s*user|overall\s*analysis|comparison\s*report|reports?)\b)/i;
+
+function isChromeLine(text: string): boolean {
+  const t = text.trim();
+  if (!t) return true;
+  if (/question\s*analytics/i.test(t)) return true;
+  if (CHROME_LINE.test(t) && t.replace(/[^A-Za-z]/g, "").length < 40) return true;
+  return false;
+}
+
+function matchDoubtHeader(text: string): number | null {
+  const badge = text.search(DOUBT_BADGE);
+  if (badge < 0) return null;
+  // Only look at the text BEFORE the badge, and take the LAST number there:
+  // OCR turns "Q.2" into "0.2", so a naive first-digit match would read 0.
+  const before = text.slice(0, badge);
+  const nums = before.match(/\d{1,3}/g);
+  if (!nums?.length) return null;
+  const n = Number(nums[nums.length - 1]);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+// Furniture that repeats on every page of a screenshot-style export. OCR reads
+// it in the middle of the document once the question header has been cropped,
+// so it must never be mistaken for a question stem.
+const PAGE_FURNITURE =
+  /(?:t[ae]st\s*[-–]?\s*\d+\s*:|made\s*easy|overall\s*analysis|comparison\s*report|solution\s*report|enroll\s*user|sign\s*out|electrical\s*engineering|all\s*\(\s*\d+\s*\)|correct\s*\(\s*\d|skipped\s*\(|item\s*\d-(?:\s*\d+)?\s*of\s*\d|assertion|of\s*\d+\s*\||nexts?$|page\s*\d+\s*(?:of|\/)|question\s*analytics|have\s*any\s*doubt)/i;
+
+function isPageFurniture(text: string): boolean {
+  return PAGE_FURNITURE.test(text);
+}
+
+const ANALYTICS_FOOTER = /question\s*analytics/i;
+
+/**
+ * True for OCR debris such as "ar a", "an ;", "as a" — the mangled remains of a
+ * question header bar that was cropped out of a screenshot. Such a line must not
+ * become a question stem.
+ */
+function isOcrDebris(text: string): boolean {
+  const t = text.trim();
+  if (!t) return true;
+  if (t.length > 32) return false;
+  const words = t.match(/[A-Za-z]{3,}/g) ?? [];
+  return words.length === 0;
+}
+
+function stripUiChrome(text: string): string {
+  return text
+    .replace(/[({[]?\s*[®©?]?\s*have\s*any\s*doubt\s*[?2]?\s*[|\]\[]*/gi, " ")
+    .replace(/[|\]]*\s*question\s*analytics\s*\+?/gi, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 function scanOptionMarkers(line: string): { letter: string; start: number; contentStart: number; lower: boolean }[] {
   const out: { letter: string; start: number; contentStart: number; lower: boolean }[] = [];
   // Line-start / wide-gap / single-space-before-paren markers: "(A) x  (B) y",
   // "A) x    B) y", "(A) x (B) y" all supported.
-  const re = /(?:^|[\t]|\s{2,}|\s(?=[(\[]|(?:[A-Ea-e][)\].])))[(\[]?([A-Ea-e])[)\].][\s]*/g;
+  const re = /(?:^|[\t]|\s{2,}|\s(?=[(\[]|(?:[A-Ea-e0-9©®€][)\].])))[(\[]?([A-Ea-e0-9©®€])[)\].][\s]*/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(line))) {
     out.push({
-      letter: m[1].toUpperCase(),
+      letter: normaliseMarkerLetter(m[1].toUpperCase()),
       start: m.index,
       contentStart: m.index + m[0].length,
-      lower: m[1] === m[1].toLowerCase(),
+      lower: m[1] === m[1].toLowerCase() && !(m[1] in OCR_LETTER_DIGITS),
     });
   }
   // A lone mid-sentence marker like "choose (A) ..." is not an option line
@@ -384,6 +534,7 @@ interface Builder {
   explanation: string | null;
   explMode: boolean;
   lastOpt: string | null;
+  mirroredSeen: boolean;
   pageStart: number;
   pageEnd: number;
   order: number;
@@ -400,6 +551,7 @@ function newBuilder(number: number | null, page: number, order: number): Builder
     explanation: null,
     explMode: false,
     lastOpt: null,
+    mirroredSeen: false,
     pageStart: page,
     pageEnd: page,
     order,
@@ -416,10 +568,73 @@ function stripTicks(seg: string): { text: string; ticked: boolean } {
   return { text: seg.replace(TICK_RE, "").replace(/\s{2,}/g, " ").trim(), ticked };
 }
 
-function applyOptionLine(b: Builder, line: PdfLine): boolean {
-  const markers = scanOptionMarkers(line.text);
-  if (!markers.length) return false;
+/**
+ * Positional option fallback for image-rendered option bullets.
+ *
+ * Screen exports often draw the A/B/C/D bullet as a graphic. OCR then returns
+ * anything from "(A)" to "(8)" to "(pn)" to nothing at all. When a line starts
+ * with a bracketed run that is clearly not prose, trust its POSITION: the
+ * options appear in order, so they can be labelled A, B, C… regardless of the
+ * glyph OCR guessed.
+ */
+const OCR_BULLET_WORDS = new Set(["pn", "rw", "ln", "oc", "cd", "ob", "qb", "ro", "vo"]);
+
+const PROSE_BRACKET =
+  /^\s*[([]\s*(?:i{1,3}|iv|v|vi|rs|fig|figs|no|eq|vol|mm|cm|km|kg|sec|hr|approx)\s*[)\]]/i;
+
+function positionalMarker(text: string): { contentStart: number } | null {
+  const m = text.match(/^\s*[([]\s*([^()\[\]]{1,3})\s*[)\].]\s*(\S.*)$/);
+  if (!m) return null;
+  const token = m[1].trim();
+  if (!token) return null;
+  // A word inside brackets is normally prose — unless it is one of the letter
+  // look-alikes OCR produces for a circled bullet ("pn", "rw", "ln", "oc").
+  if (/^[A-Za-z]{2,}$/.test(token) && !OCR_BULLET_WORDS.has(token.toLowerCase())) return null;
+  if (PROSE_BRACKET.test(text)) return null;
+  return { contentStart: text.length - m[2].length };
+}
+
+// A plain "(A) text" / "A) text" line is handled by the normal marker scanner;
+// the positional path exists only for mangled bullets.
+const CLEAN_LETTER_MARK = /^\s*[([]?\s*[A-Fa-f]\s*[)\].]\s+\S/;
+
+function applyPositionalOptions(b: Builder, line: PdfLine): boolean {
+  if (CLEAN_LETTER_MARK.test(line.text)) return false;
+  const pos = positionalMarker(line.text);
+  if (!pos) return false;
   const expected = expectedLetter(b);
+  if (expected === "Z") return false;
+  if (b.options[expected] !== undefined) return false;
+  const tick = stripTicks(line.text.slice(pos.contentStart));
+  const badge = stripCorrectBadge(tick.text);
+  if (!badge.text) return false;
+  b.options[expected] = badge.text;
+  b.optionBold[expected] = line.boldRatio;
+  b.lastOpt = expected;
+  if (tick.ticked || badge.badge) b.tickedOption = expected;
+  return true;
+}
+
+function applyOptionLine(b: Builder, line: PdfLine): boolean {
+  let markers = scanOptionMarkers(line.text);
+  const expected = expectedLetter(b);
+  if (!markers.length) {
+    // A bracket-surrounded token that is NOT a letter at all — "(pn)", "[5]",
+    // "(cg" — or a lone glyph such as "© " in the slot where the next option
+    // belongs. A real letter must go through the normal chain logic above so
+    // short options like "(A) x" keep working.
+    const m = line.text.match(/^\s*(?:[([]\s*([^A-Za-z()\[\]]{1,3}[^()\[\]]*?)\s*[)\].]|([©®€≤▸►●]))\s+(\S.*)$/);
+    if (
+      m &&
+      b.lastOpt !== null &&
+      expected !== "Z" &&
+      LETTERS.includes(expected)
+    ) {
+      const consumed = m[0].length - m[3].length;
+      markers = [{ letter: expected, start: 0, contentStart: consumed, lower: false }];
+    }
+  }
+  if (!markers.length) return applyPositionalOptions(b, line);
 
   let startIdx = -1;
   if (markers[0].letter === expected) {
@@ -439,12 +654,16 @@ function applyOptionLine(b: Builder, line: PdfLine): boolean {
       if (chainOk && b.lastOpt === null && markers[0].letter === "A") startIdx = 0;
     }
   }
-  if (startIdx === -1) return false;
+  if (startIdx === -1) return applyPositionalOptions(b, line);
 
   for (let i = startIdx; i < markers.length; i++) {
     const cur = markers[i];
     const end = i + 1 < markers.length ? markers[i + 1].start : line.text.length;
-    const { text, ticked } = stripTicks(line.text.slice(cur.contentStart, end));
+    const rawSeg = line.text.slice(cur.contentStart, end);
+    const tick = stripTicks(rawSeg);
+    const badge = stripCorrectBadge(tick.text);
+    const text = badge.text;
+    const ticked = tick.ticked || badge.badge;
     // prefix of the line before first marker might continue the stem
     if (i === startIdx && startIdx === 0 && cur.start > 0) {
       const prefix = line.text.slice(0, cur.start).trim();
@@ -522,7 +741,8 @@ function finalizeBuilder(b: Builder, key: Map<number, KeyHit>, keyUsed: Set<numb
 
 export function parseMcqPdf(linesIn: PdfLine[], opts: { wholeFileIsKey?: boolean } = {}): ParseResult {
   const warnings: string[] = [];
-  const { lines, removed } = stripHeadersFooters(linesIn);
+  const rail = stripNavRail(linesIn);
+  const { lines, removed } = stripHeadersFooters(rail.lines);
 
   if (opts.wholeFileIsKey) {
     const keyHits = parseKeyLines(lines, true);
@@ -545,6 +765,13 @@ export function parseMcqPdf(linesIn: PdfLine[], opts: { wholeFileIsKey?: boolean
     if (cur) parsed.push(cur);
   };
 
+    // Browser-report exports stamp every real question header with a "Have any
+  // Doubt" button. When that pattern is present it is far more reliable than
+  // guessing from numbering: engineering papers embed numbered statement lists
+  // ("1. … 2. …") that would otherwise be mistaken for new questions.
+  const badgeStarts = lines.filter((l) => DOUBT_BADGE.test(l.text)).length;
+  const badgeOnlyStarts = badgeStarts >= 3;
+  let pendingAfterFooter = false;
   for (let i = 0; i < lines.length; i++) {
     if (zones.skip[i]) {
       continue;
@@ -554,7 +781,57 @@ export function parseMcqPdf(linesIn: PdfLine[], opts: { wholeFileIsKey?: boolean
     if (!t.trim()) continue;
 
     // 1. Question start?
-    const qm = matchQuestionStart(t);
+    //    A "Have any Doubt" header proves this line introduces a question even
+    //    when OCR mangled the number ("Q.2" -> "0.2").
+    // A "Have any Doubt" header IS page furniture, but it also identifies a
+    // question — so read the number first, then drop non-question furniture.
+    // The "QUESTION ANALYTICS" footer must be handled before any generic noise
+    // filter: its line is punctuation-heavy and would otherwise be discarded.
+    if (ANALYTICS_FOOTER.test(t)) {
+      if (cur && cur.number === null) cur.number = (lastExplicit ?? 0) + 1;
+      if (cur && cur.number !== null) lastExplicit = cur.number;
+      if (cur) cur.explMode = false;
+      commit();
+      cur = null;
+      pendingAfterFooter = true;
+      continue;
+    }
+
+    if (pendingAfterFooter) {
+      if (isOcrDebris(t) || isChromeLine(t) || isPageFurniture(t)) continue;
+      pendingAfterFooter = false;
+      const nextNum: number = (lastExplicit ?? 0) + 1;
+      cur = newBuilder(nextNum, line.page, order++);
+      lastExplicit = nextNum;
+      const rest = stripUiChrome(t);
+      if (rest && !applyOptionLine(cur, { ...line, text: rest })) cur.stem = rest;
+      continue;
+    }
+
+    // A line with no letters at all is OCR noise, never a question stem — and
+    // its leading digits must not be read as a question number.
+    if (!/[A-Za-z]/.test(t)) continue;
+
+    const doubtNum = matchDoubtHeader(t);
+    if (doubtNum === null && isPageFurniture(t)) continue;
+    // When the document is badge-driven, ignore any other "question start"
+    // pattern in a line that also contains furniture text.
+    // ...but "Solution :" is chrome-looking AND an explanation marker — never
+    // drop a line that carries an answer/explanation marker.
+    if (
+      doubtNum === null &&
+      badgeOnlyStarts &&
+      isChromeLine(t) &&
+      !EXPL_INLINE.test(t) &&
+      !ANS_INLINE.test(t)
+    )
+      continue;
+    const qm =
+      doubtNum !== null
+        ? { num: doubtNum, rest: stripUiChrome(t) }
+        : badgeOnlyStarts
+          ? null
+          : matchQuestionStart(t);
     if (qm) {
       const num = qm.num;
       const seqOk =
@@ -568,7 +845,7 @@ export function parseMcqPdf(linesIn: PdfLine[], opts: { wholeFileIsKey?: boolean
         commit();
         cur = newBuilder(num, line.page, order++);
         lastExplicit = num;
-        const rest = qm.rest.trim();
+        const rest = stripUiChrome(qm.rest.trim());
         if (rest) {
           // stem may contain inline options: "(A) x (B) y ..."
           if (!applyOptionLine(cur, { ...line, text: rest })) {
@@ -595,24 +872,68 @@ export function parseMcqPdf(linesIn: PdfLine[], opts: { wholeFileIsKey?: boolean
       continue;
     }
 
+    // 2b-ii. First real line after that footer starts the next question, which
+    //        has no visible number: continue the sequence.
+    // 2b-iii. Pure UI chrome (stray toolbar glyphs) is not content; dropping it
+    //         keeps it out of stems and explanations.
+    if (isChromeLine(t)) continue;
+
+    // 2c. A bare "(b)" line right after "Solution :" is the mirrored answer,
+    //     not prose: use it to close the inline explanation.
+    if (cur.explMode && /^\s*[([]?\s*[A-Da-d]\s*[)\].]?\s*$/.test(t)) {
+      // The mirrored answer directly under "Solution :". Consume it, but STAY in
+      // explanation mode: the prose that follows still belongs to the solution,
+      // and the next real option line ends the mode (see step 3).
+      if (!cur.inlineAnswer) cur.inlineAnswer = t.replace(/[^A-Da-d]/g, "").toUpperCase();
+      cur.mirroredSeen = true;
+      continue;
+    }
+
+    // 2c-ii. A leftover fragment of the mirrored answer, e.g. "(a)" or "{cI",
+    //     that survived the line above. Drop it instead of appending it to an
+    //     option.
+    if (cur.explMode && cur.mirroredSeen && /^\s*[([]?\s*[A-Da-d][)\].]?\s*$/.test(t)) {
+      continue;
+    }
+
     // 3. Option markers?
-    if (!cur.explMode && applyOptionLine(cur, line)) {
+    const optAccepted = applyOptionLine(cur, line);
+    if (optAccepted) {
+      if (cur.explMode) cur.explMode = false;
       continue;
     }
 
     // 4. Continuation text
     cur.pageEnd = line.page;
+    if (cur.explMode) {
+      // Prose that follows "Solution :" is explanation, never option text.
+      cur.explanation = cur.explanation ? (cur.explanation + " " + t.trim()).trim() : t.trim();
+      continue;
+    }
     if (cur.explMode && cur.explanation !== null) {
       cur.explanation = (cur.explanation + " " + t.trim()).trim();
     } else if (cur.lastOpt) {
-      const { text: seg, ticked } = stripTicks(t);
-      cur.options[cur.lastOpt] = (cur.options[cur.lastOpt] + " " + seg).trim();
-      if (ticked) cur.tickedOption = cur.lastOpt;
+      const tick = stripTicks(t);
+      const badge = stripCorrectBadge(tick.text);
+      const seg = badge.text;
+      if (seg) cur.options[cur.lastOpt] = (cur.options[cur.lastOpt] + " " + seg).trim();
+      if (tick.ticked || badge.badge) cur.tickedOption = cur.lastOpt;
     } else {
       cur.stem = (cur.stem ? cur.stem + " " : "") + t.trim();
     }
   }
   commit();
+
+  // Screenshot blocks whose header was cropped lose their number. Renumber
+  // those in document order so the bank is ordered sensibly instead of showing
+  // a run of "null" (or repeated) numbers.
+  {
+    let prev = 0;
+    for (const b of parsed) {
+      if (b.number === null || b.number <= prev) b.number = prev + 1;
+      prev = b.number;
+    }
+  }
 
   // Resolve answers & explanations
   const keyUsed = new Set<number>();

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   Database,
   FileUp,
@@ -26,16 +26,13 @@ const LINKS = [
 
 export function Nav() {
   const pathname = usePathname();
-  const [dark, setDark] = useState(false);
   const [open, setOpen] = useState(false);
 
-  useEffect(() => {
-    setDark(document.documentElement.classList.contains("dark"));
-  }, []);
-
+  // The theme lives on the <html> class (set by the script in layout.tsx before
+  // hydration), not in React state: this keeps the server and client markup
+  // identical — the sun/moon icons are swapped by CSS, so no hydration mismatch.
   const toggleTheme = () => {
-    const next = !dark;
-    setDark(next);
+    const next = !document.documentElement.classList.contains("dark");
     document.documentElement.classList.toggle("dark", next);
     try {
       localStorage.setItem("mcq-theme", next ? "dark" : "light");
@@ -73,7 +70,8 @@ export function Nav() {
             aria-label="Toggle dark mode"
             title="Toggle theme"
           >
-            {dark ? <Sun size={17} /> : <Moon size={17} />}
+            <Moon size={17} className="hidden dark:block" />
+            <Sun size={17} className="block dark:hidden" />
           </button>
           <button
             className="btn-ghost btn !px-2.5 md:hidden"

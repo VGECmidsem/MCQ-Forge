@@ -10,7 +10,8 @@ performance analytics.
 | --- | --- |
 | PDF upload | Multi-file upload with 20 MB / per-file validation, progress queue, per-file type (question paper or standalone answer key). Files are processed in memory; **original PDFs are never stored** — only extracted questions land in PostgreSQL. |
 | Text extraction | pdf.js (server side) with positional line reconstruction: vertical or horizontal option layouts, multi-line stems, questions spanning pages, repeated header/footer removal. |
-| OCR | Scanned/image-only pages are rendered with pdf.js + `@napi-rs/canvas` and read with `tesseract.js` (`eng`). Pages that fail OCR are flagged instead of dropped. |
+| OCR | Scanned/image-only pages are rendered with pdf.js + `@napi-rs/canvas` and read with `tesseract.js` (`eng`, bundled — works offline). OCR keeps word bounding boxes, so lines are rebuilt by position instead of arriving as one flat blob; a left navigation rail (browser screenshots) is detected by its whitespace gutter and dropped. Pages that fail OCR are flagged instead of dropped. |
+| Screenshot exports | Test-report PDFs made from browser screenshots (green "Correct Option" highlight, "Have any Doubt ?" header, "QUESTION ANALYTICS" footer) are understood: the highlight is read as the marked answer, the footer delimits questions even where the header was cropped, and circled option bullets that OCR misreads (`(8)`, `(pn)`, `©`) are resolved by position. |
 | MCQ parsing | Deterministic state machine — numbered questions in every common numbering style (`1.`, `(1)`, `Q.1`, `Question 12`, `5)`), options marked `(A)` / `A)` / `A.`, 2–6 options, inline and trailing explanations. |
 | Answer resolution (priority) | ① End-of-document / heading-anchored answer keys (tables, `1. B`, `12) (A)`, two-row OMR rows, keys with explanations) matched by number — with order fallback when numbering doesn't overlap; ② tick marks (✓), bold-marked options, inline `Ans:`/`Answer:` labels; ③ AI solving (opt-in, per selection); ④ everything unresolved is flagged **Needs Verification** — never guessed. |
 | Answer keys in separate files | Upload a key-only PDF; "Fill unresolved only" mode fills gaps without overwriting, or target a specific source to re-apply a whole key. |
@@ -21,16 +22,41 @@ performance analytics.
 | Exam UI | One question at a time, A–D choice buttons, prev/next, mark-for-review, jump palette with answered/unanswered/marked states, live countdown, keyboard shortcuts (1–4, arrows), autosave + resume, guarded submit. Mobile responsive with palette drawer. |
 | Results | Score donut, attempted/correct/incorrect/unanswered/ungraded, marks & negative marks, accuracy, time taken, topic-wise bars, full question review with your pick vs correct answer + explanations, filters (incorrect/marked), retake and new-random-test actions. |
 
+## Quick start — run it as a website
+
+```bash
+npm install
+npm run site          # → http://localhost:3000
+```
+
+No database to install: the `site` script boots an embedded PostgreSQL (data in `.data/pg`),
+applies migrations, builds and serves the app. Then click **Load demo question bank** on the
+dashboard, or drop one of the sample PDFs on `/upload`.
+
+To publish it publicly (Docker, Railway/Render, Vercel + Neon, or your own VPS), follow
+**[DEPLOY.md](DEPLOY.md)** — it walks through each option step by step.
+
+To check everything by hand in a browser — upload, extraction quality, editing, a full mock
+test, results and backup — follow **[VERIFY.md](VERIFY.md)** (a ~10 minute checklist).
+
+Working straight from GitHub? **[GITHUB.md](GITHUB.md)** covers running it in Codespaces, deploying
+from the repo, cloning to your machine and the everyday commit/PR workflow.
+
 ## Tech stack
 
 - **Next.js 16 (App Router) + React 19 + TypeScript**, Tailwind CSS v4, Lucide icons
 - **PostgreSQL + Drizzle ORM** (`sources`, `questions`, `tests`, `attempts`)
-- pdf.js `pdfjs-dist` (server-side text extraction + rendering), `tesseract.js` OCR, `xlsx` export
+- pdf.js `pdfjs-dist` (server-side text extraction + rendering), `tesseract.js` OCR with the
+  `eng` model bundled in `assets/tesseract/` (works offline), `xlsx` export
 - Deterministic parsing wherever possible — AI is used only for question solving, never for extraction
 
-## Environment variables (all optional, server-side only)
+## Environment variables
+
+`DATABASE_URL` is required in every deployment (the `npm run site` wrapper creates one for you).
+The AI keys below are optional and server-side only:
 
 ```env
+DATABASE_URL=postgresql://user:password@host:5432/mcqforge
 GEMINI_API_KEY=...        # enables AI answer generation via Gemini (recommended)
 GEMINI_MODEL=gemini-2.0-flash
 # — OR —
@@ -41,6 +67,18 @@ OPENAI_MODEL=gpt-4o-mini
 
 Without an AI key everything still works: answer keys, marked answers, manual editing, tests,
 and the whole bank are fully functional — unresolved questions just remain *Needs Verification*.
+
+## npm scripts
+
+| Script | What it does |
+| --- | --- |
+| `npm run site` | **One-command website**: embedded Postgres + migrations + build + serve. |
+| `npm run dev` | Next.js dev server (needs `DATABASE_URL`). |
+| `npm run build` / `npm start` | Standalone production build / serve (needs `DATABASE_URL`). |
+| `npm run start:prod` | Apply migrations, then `next start` — used by hosters. |
+| `npm run db:migrate` | Apply `drizzle/*.sql` migrations (idempotent). |
+| `npm run db:generate` | Generate a new migration from `src/db/schema.ts`. |
+| `npm run lint` / `npm run typecheck` | ESLint / `tsc --noEmit`. |
 
 ## Testing the pipeline
 
@@ -56,3 +94,7 @@ node scripts/make-samples.mjs   # writes 4 sample PDFs to scratch/samples/
 - `sample-scanned.pdf` — image-only page that exercises the OCR pipeline
 
 There's also a one-click **demo question bank** on the home dashboard for instant testing.
+
+## License
+
+MIT — use it, fork it, run it for your own exams.

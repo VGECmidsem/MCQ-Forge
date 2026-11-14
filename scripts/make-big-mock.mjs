@@ -1,9 +1,13 @@
 // Generates a larger 120-question paper to profile extraction at scale.
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import PDFDocument from "pdfkit";
 
-const OUT = "/app/scratch/samples/big-120q.pdf";
-fs.mkdirSync("/app/scratch/samples", { recursive: true });
+const OUT = SAMPLES + "/big-120q.pdf";
+// Portable output directory: <repo>/scratch/samples (works from any checkout).
+const SAMPLES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "scratch", "samples");
+fs.mkdirSync(SAMPLES, { recursive: true });
 const FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
 const FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 
